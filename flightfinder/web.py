@@ -45,7 +45,7 @@ def index(request: Request) -> HTMLResponse:
             cheapest = storage.cheapest_combo(t["name"])
             cards.append({"trip": t, "cheapest": cheapest})
         return templates.TemplateResponse(
-            "index.html", {"request": request, "cards": cards}
+            request, "index.html", {"cards": cards}
         )
     finally:
         storage.close()
@@ -65,9 +65,9 @@ def trip_detail(request: Request, name: str) -> HTMLResponse:
             "prices": [p["cheapest_total_price"] for p in history],
         }
         return templates.TemplateResponse(
+            request,
             "trip.html",
             {
-                "request": request,
                 "trip": trips[name],
                 "combos": combos,
                 "chart_json": json.dumps(chart),

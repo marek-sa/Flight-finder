@@ -6,17 +6,19 @@ holiday planner: instead of searching "London → Tokyo" directly, it asks
 "What is the cheapest way to fly from London to Tokyo if I first stop anywhere
 for 3 to 6 nights?"
 
-Prices are pulled from the [Amadeus Self-Service](https://developers.amadeus.com/)
-API (free tier), stored in SQLite, and served through a small FastAPI web UI
+Prices come from live Google Flights via the
+[`fast-flights`](https://github.com/AWeirdDev/flights) scraper (no API key
+required), are stored in SQLite, and served through a small FastAPI web UI
 plus a CLI refresher you can trigger on a schedule.
 
 ## How the search works
 
 For each trip defined in `config.yaml`:
 
-1. **Discover intermediate cities X.** Either use the trip's whitelist, or
-   call Amadeus *Flight Inspiration Search* from A over the departure window.
-2. **Price every leg.** For each X, fetch *Flight Offers Search* results for
+1. **Pick intermediate cities X.** Either use the trip's whitelist, or fall
+   back to a built-in list of major hubs (see
+   `flightfinder.search.DEFAULT_HUBS`).
+2. **Scrape prices.** For each X, fetch Google Flights one-way results for
    A → X on every date in the depart window, and for X → B on every date in
    `[depart_from + min_nights, depart_to + max_nights]`. Results are cached
    in SQLite for a configurable TTL so repeated refreshes reuse them.
@@ -29,19 +31,17 @@ For each trip defined in `config.yaml`:
 ## Setup
 
 ```bash
-git clone https://github.com/marek-sa/flight-finder.git
-cd flight-finder
+git clone https://github.com/marek-sa/Flight-finder.git
+cd Flight-finder
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-cp .env.example .env          # fill in your Amadeus credentials
 cp config.example.yaml config.yaml
 $EDITOR config.yaml
 ```
 
-Get free API credentials at <https://developers.amadeus.com/> → create a
-Self-Service app → copy the API key and secret into `.env`.
+Optionally copy `.env.example` to `.env` to tweak concurrency or the DB path.
 
 ## Usage
 
@@ -50,10 +50,10 @@ Self-Service app → copy the API key and secret into `.env`.
 python -m flightfinder.cli refresh
 
 # Refresh one trip only.
-python -m flightfinder.cli refresh --trip lon-to-tyo-citybreak
+python -m flightfinder.cli refresh --trip tenerife-to-krakow-citybreak
 
-# Show the current cheapest combos stored for a trip (no API calls).
-python -m flightfinder.cli list lon-to-tyo-citybreak
+# Show the current cheapest combos stored for a trip (no scraping).
+python -m flightfinder.cli list tenerife-to-krakow-citybreak
 
 # Run the web UI on http://127.0.0.1:8000/
 python -m flightfinder.cli web
@@ -61,6 +61,14 @@ python -m flightfinder.cli web
 
 The CLI highlights combos in green when their total is at or below the
 `max_total_price` threshold for that trip.
+
+### Be polite to Google
+
+`fast-flights` scrapes Google Flights. Tune `FLIGHTFINDER_CONCURRENCY` (default
+`3`) and keep the date window + candidate-city list small to avoid being
+rate-limited. If you start getting empty results, try
+`FLIGHTFINDER_FETCH_MODE=fallback` (uses Playwright — run `playwright install
+chromium` first).
 
 ## Schedule with systemd
 
@@ -86,8 +94,8 @@ See `config.example.yaml`. Key fields per trip:
 | `depart_date_from` / `depart_date_to` | Window for the first leg. |
 | `layover_nights_min` / `layover_nights_max` | Allowed nights in the intermediate city. |
 | `max_total_price` | Highlight / "alert" threshold for the cheapest combo. |
-| `candidate_intermediate_cities` | Optional whitelist. If empty, Flight Inspiration discovers them. |
-| `adults`, `cabin`, `currency` | Pax + cabin class + pricing currency. |
+| `candidate_intermediate_cities` | Optional whitelist. If empty, the default hub list is used. |
+| `adults`, `cabin` | Pax + cabin class. |
 
 ## Development
 
@@ -96,15 +104,17 @@ pytest -q
 ```
 
 Unit tests cover config validation, storage round-trips, the leg-pairing
-algorithm, and the Amadeus HTTP client (token cache + 429 backoff) via `respx`.
+algorithm, and the fast-flights wrapper (price/time parsing, overnight
+handling, error fallback).
 
 ## Layout
 
 ```
 flightfinder/
-  amadeus.py      # async HTTP client + OAuth2 token cache
+  flights.py      # fast-flights wrapper: get_flights -> list[Leg]
   search.py       # pair_legs() + search_trip() orchestration
   storage.py      # SQLite schema: trips, legs_cache, combos, price_history
+  models.py       # Leg / Combo dataclasses
   config.py       # Pydantic config models + YAML loader
   cli.py          # `refresh` / `list` / `web` subcommands
   web.py          # FastAPI app (index + /trip/{name})

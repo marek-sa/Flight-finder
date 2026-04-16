@@ -1,95 +1,42 @@
-"""Compose Amadeus endpoints into 'cheapest A -> X -> B with a break' queries.
+"""Compose fast-flights queries into 'cheapest A -> X -> B with a break' trips.
 
 The core pure function here is :func:`pair_legs`, which takes two lists of
 priced one-way legs and returns every (leg1, leg2) combination that satisfies
 the minimum/maximum layover constraint, ranked by total price. It has no I/O
 so it is trivially unit-testable.
 
-:func:`search_trip` is the glue: it discovers candidate intermediate cities
-(either from the user's whitelist or from Flight Inspiration Search), fetches
-leg offers for each side of the trip (with SQLite-backed caching), and hands
-everything to ``pair_legs``.
+:func:`search_trip` is the glue: for every candidate intermediate city X, it
+asks the provider (fast-flights) for leg A->X and leg X->B offers over the
+trip's date windows (with SQLite-backed caching), then hands everything to
+``pair_legs``.
+
+Because ``fast-flights`` does not offer an "anywhere from origin" discovery
+endpoint, we rely on the trip's ``candidate_intermediate_cities`` list. If
+the user leaves it empty, we fall back to :data:`DEFAULT_HUBS`.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import asdict
+from datetime import date, timedelta
 from typing import Any, Iterable
 
-from .amadeus import AmadeusClient
 from .config import TripConfig
+from .flights import fetch_one_way_offers
+from .models import Combo, Leg
 from .storage import Storage
 
 log = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class Leg:
-    origin: str
-    destination: str
-    depart: datetime
-    arrive: datetime
-    price: float
-    currency: str
-    carrier: str | None = None
-
-
-@dataclass(frozen=True)
-class Combo:
-    intermediate: str
-    leg1: Leg
-    leg2: Leg
-    total_price: float
-    layover_nights: int
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "intermediate": self.intermediate,
-            "leg1_depart": self.leg1.depart.isoformat(),
-            "leg1_arrive": self.leg1.arrive.isoformat(),
-            "leg2_depart": self.leg2.depart.isoformat(),
-            "leg2_arrive": self.leg2.arrive.isoformat(),
-            "layover_nights": self.layover_nights,
-            "leg1_price": self.leg1.price,
-            "leg2_price": self.leg2.price,
-            "total_price": self.total_price,
-            "currency": self.leg1.currency,
-            "leg1_carrier": self.leg1.carrier,
-            "leg2_carrier": self.leg2.carrier,
-        }
-
-
-# ---------------------------------------------------------------- parsing
-def parse_offer(offer: dict[str, Any]) -> Leg | None:
-    """Extract a :class:`Leg` from an Amadeus Flight Offers ``data`` entry.
-
-    Amadeus responses are deeply nested; we take the first itinerary and look
-    at its first and last segment to get origin/destination + times. Returns
-    ``None`` if the offer is malformed.
-    """
-    try:
-        itin = offer["itineraries"][0]
-        segs = itin["segments"]
-        first, last = segs[0], segs[-1]
-        depart = datetime.fromisoformat(first["departure"]["at"])
-        arrive = datetime.fromisoformat(last["arrival"]["at"])
-        price = float(offer["price"]["grandTotal"])
-        currency = offer["price"]["currency"]
-        carrier = first.get("carrierCode")
-        return Leg(
-            origin=first["departure"]["iataCode"],
-            destination=last["arrival"]["iataCode"],
-            depart=depart,
-            arrive=arrive,
-            price=price,
-            currency=currency,
-            carrier=carrier,
-        )
-    except (KeyError, IndexError, ValueError, TypeError) as exc:
-        log.debug("skip malformed offer: %s", exc)
-        return None
+# Reasonable default list of intermediate-city candidates when the trip's
+# whitelist is empty. Mostly major European/Middle-Eastern hubs with good
+# onward connectivity. Users can override per-trip in config.
+DEFAULT_HUBS: list[str] = [
+    "LON", "PAR", "AMS", "FRA", "MAD", "BCN", "LIS", "ROM", "MIL",
+    "IST", "DUB", "CPH", "ZRH", "VIE", "ATH", "WAW", "PRG", "DXB",
+]
 
 
 # -------------------------------------------------------------- core pairing
@@ -118,6 +65,9 @@ def pair_legs(
                 continue
             if l2.depart <= l1.arrive:
                 continue
+            # Cross-currency totals would be meaningless; skip mismatches.
+            if l1.currency != l2.currency:
+                continue
             combos.append(
                 Combo(
                     intermediate=l1.destination,
@@ -140,7 +90,6 @@ def _daterange(start: date, end: date) -> list[date]:
 
 # ---------------------------------------------------------- cached fetches
 async def _fetch_offers_cached(
-    client: AmadeusClient,
     storage: Storage,
     origin: str,
     destination: str,
@@ -148,73 +97,62 @@ async def _fetch_offers_cached(
     *,
     adults: int,
     cabin: str,
-    currency: str,
     ttl_seconds: int,
 ) -> list[Leg]:
     key_date = depart_date.isoformat()
     cached = storage.get_cached_offers(origin, destination, key_date, ttl_seconds)
-    if cached is None:
-        try:
-            cached = await client.flight_offers(
-                origin,
-                destination,
-                depart_date,
-                adults=adults,
-                cabin=cabin,
-                currency=currency,
-            )
-        except Exception as exc:  # noqa: BLE001 — log and treat as no offers.
-            log.warning("flight_offers %s->%s %s failed: %s", origin, destination, key_date, exc)
-            return []
-        storage.put_cached_offers(origin, destination, key_date, cached)
-    legs: list[Leg] = []
-    for offer in cached:
-        leg = parse_offer(offer)
-        if leg is not None:
-            legs.append(leg)
+    if cached is not None:
+        return [Leg(**_rehydrate(row)) for row in cached]
+
+    legs = await fetch_one_way_offers(
+        origin, destination, depart_date, adults=adults, cabin=cabin
+    )
+    storage.put_cached_offers(
+        origin,
+        destination,
+        key_date,
+        [_serialize_leg(leg) for leg in legs],
+    )
     return legs
 
 
-async def _discover_intermediates(
-    client: AmadeusClient,
-    trip: TripConfig,
-    cap: int,
-) -> list[str]:
-    """Return candidate intermediate city codes.
+def _serialize_leg(leg: Leg) -> dict[str, Any]:
+    d = asdict(leg)
+    d["depart"] = leg.depart.isoformat()
+    d["arrive"] = leg.arrive.isoformat()
+    return d
 
-    Uses the trip's whitelist when non-empty; otherwise calls Flight Inspiration
-    Search for the origin over the date window.
-    """
-    if trip.candidate_intermediate_cities:
-        return trip.candidate_intermediate_cities[:cap]
-    date_range = f"{trip.depart_date_from.isoformat()},{trip.depart_date_to.isoformat()}"
-    try:
-        results = await client.flight_destinations(
-            trip.origin,
-            departure_date=date_range,
-            one_way=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "flight_destinations for %s failed (%s); "
-            "add candidate_intermediate_cities to the trip to proceed",
-            trip.origin,
-            exc,
-        )
-        return []
-    seen: list[str] = []
-    for row in results:
-        dest = row.get("destination")
-        if dest and dest != trip.destination and dest not in seen:
-            seen.append(dest)
-        if len(seen) >= cap:
+
+def _rehydrate(row: dict[str, Any]) -> dict[str, Any]:
+    from datetime import datetime
+    return {
+        "origin": row["origin"],
+        "destination": row["destination"],
+        "depart": datetime.fromisoformat(row["depart"]),
+        "arrive": datetime.fromisoformat(row["arrive"]),
+        "price": float(row["price"]),
+        "currency": row["currency"],
+        "carrier": row.get("carrier"),
+        "stops": row.get("stops"),
+    }
+
+
+def _intermediates_for(trip: TripConfig, cap: int) -> list[str]:
+    """Return the candidate intermediate city list, skipping the destination."""
+    raw = trip.candidate_intermediate_cities or DEFAULT_HUBS
+    out: list[str] = []
+    for code in raw:
+        if code == trip.origin or code == trip.destination:
+            continue
+        if code not in out:
+            out.append(code)
+        if len(out) >= cap:
             break
-    return seen
+    return out
 
 
 # -------------------------------------------------------------- public api
 async def search_trip(
-    client: AmadeusClient,
     storage: Storage,
     trip: TripConfig,
     *,
@@ -223,14 +161,12 @@ async def search_trip(
     top_k: int = 50,
 ) -> list[Combo]:
     """Run the full A->X->B search for one trip config."""
-    intermediates = await _discover_intermediates(client, trip, candidate_cap)
+    intermediates = _intermediates_for(trip, candidate_cap)
     log.info("trip %s: %d candidate intermediates", trip.name, len(intermediates))
     if not intermediates:
         return []
 
-    currency = trip.currency or "EUR"
     leg1_dates = _daterange(trip.depart_date_from, trip.depart_date_to)
-    # The second-leg date window is [from + min_nights, to + max_nights].
     leg2_dates = _daterange(
         trip.depart_date_from + timedelta(days=trip.layover_nights_min),
         trip.depart_date_to + timedelta(days=trip.layover_nights_max),
@@ -240,8 +176,8 @@ async def search_trip(
         results = await asyncio.gather(
             *(
                 _fetch_offers_cached(
-                    client, storage, trip.origin, x, d,
-                    adults=trip.adults, cabin=trip.cabin, currency=currency,
+                    storage, trip.origin, x, d,
+                    adults=trip.adults, cabin=trip.cabin,
                     ttl_seconds=cache_ttl_seconds,
                 )
                 for d in leg1_dates
@@ -253,8 +189,8 @@ async def search_trip(
         results = await asyncio.gather(
             *(
                 _fetch_offers_cached(
-                    client, storage, x, trip.destination, d,
-                    adults=trip.adults, cabin=trip.cabin, currency=currency,
+                    storage, x, trip.destination, d,
+                    adults=trip.adults, cabin=trip.cabin,
                     ttl_seconds=cache_ttl_seconds,
                 )
                 for d in leg2_dates

@@ -1,12 +1,17 @@
 # Flight-finder configuration.
 # Copy to `config.yaml` and edit. Airport/city codes are IATA (3 letters).
+#
+# Backed by `fast-flights` (Google Flights scraper). Because fast-flights does
+# not have a "cheapest destinations from here" endpoint, candidate intermediate
+# cities are taken from each trip's `candidate_intermediate_cities` list; if
+# empty, a built-in list of major hubs (see flightfinder.search.DEFAULT_HUBS)
+# is used.
 
 defaults:
-  currency: EUR
   # Cap on how many candidate intermediate cities we query per trip.
-  candidate_intermediate_cities_max: 25
+  candidate_intermediate_cities_max: 20
   # Cache TTL for per-leg flight-offer results. Refreshes within this window
-  # will not re-hit the Amadeus API for the same (origin, destination, date).
+  # will not re-scrape Google for the same (origin, destination, date).
   cache_ttl_hours: 6
 
 trips:
@@ -20,8 +25,7 @@ trips:
     layover_nights_max: 6
     # Alert / highlight combos below this total (leg1 + leg2 for 1 adult).
     max_total_price: 900
-    # If empty, the tracker uses Amadeus Flight Inspiration Search to
-    # discover candidate intermediate cities. Otherwise, only these are tried.
+    # If empty, defaults (European hubs + DXB) are used.
     candidate_intermediate_cities: []
     adults: 1
     cabin: ECONOMY

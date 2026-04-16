@@ -1,19 +1,20 @@
-"""Unit tests for the pairing algorithm + offer parsing (no network)."""
+"""Unit tests for the pairing algorithm (no network)."""
 from __future__ import annotations
 
 from datetime import datetime
 
-from flightfinder.search import Leg, pair_legs, parse_offer
+from flightfinder.models import Leg
+from flightfinder.search import pair_legs
 
 
-def _leg(origin, destination, depart, arrive, price, carrier="XX"):
+def _leg(origin, destination, depart, arrive, price, carrier="XX", currency="EUR"):
     return Leg(
         origin=origin,
         destination=destination,
         depart=datetime.fromisoformat(depart),
         arrive=datetime.fromisoformat(arrive),
         price=price,
-        currency="EUR",
+        currency=currency,
         carrier=carrier,
     )
 
@@ -52,40 +53,13 @@ def test_pair_legs_sorts_and_top_k():
 
 
 def test_pair_legs_ignores_leg2_not_after_arrival():
-    # same-day departure before arrival should be dropped even at 0 nights.
     leg1 = [_leg("LON", "LIS", "2026-06-01T18:00", "2026-06-01T21:00", 90)]
     leg2 = [_leg("LIS", "TYO", "2026-06-01T19:00", "2026-06-02T10:00", 400)]
     assert pair_legs(leg1, leg2, min_nights=0, max_nights=3) == []
 
 
-def test_parse_offer_extracts_first_and_last_segment():
-    offer = {
-        "price": {"grandTotal": "123.45", "currency": "EUR"},
-        "itineraries": [
-            {
-                "segments": [
-                    {
-                        "carrierCode": "BA",
-                        "departure": {"iataCode": "LHR", "at": "2026-06-01T08:00:00"},
-                        "arrival": {"iataCode": "CDG", "at": "2026-06-01T10:00:00"},
-                    },
-                    {
-                        "carrierCode": "AF",
-                        "departure": {"iataCode": "CDG", "at": "2026-06-01T12:00:00"},
-                        "arrival": {"iataCode": "LIS", "at": "2026-06-01T14:30:00"},
-                    },
-                ]
-            }
-        ],
-    }
-    leg = parse_offer(offer)
-    assert leg is not None
-    assert leg.origin == "LHR"
-    assert leg.destination == "LIS"
-    assert leg.price == 123.45
-    assert leg.carrier == "BA"
-
-
-def test_parse_offer_returns_none_on_malformed_data():
-    assert parse_offer({}) is None
-    assert parse_offer({"itineraries": []}) is None
+def test_pair_legs_skips_currency_mismatch():
+    leg1 = [_leg("LON", "LIS", "2026-06-01T08:00", "2026-06-01T11:00", 100, currency="GBP")]
+    leg2 = [_leg("LIS", "TYO", "2026-06-05T09:00", "2026-06-06T06:00", 400, currency="EUR")]
+    # Different currencies would produce meaningless totals; combo is dropped.
+    assert pair_legs(leg1, leg2, min_nights=3, max_nights=6) == []

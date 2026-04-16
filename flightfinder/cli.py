@@ -23,8 +23,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
-from .amadeus import AmadeusClient
 from .config import Config, TripConfig, load_config
+from .models import Combo
 from .search import search_trip
 from .storage import ComboRow, Storage
 
@@ -35,7 +35,12 @@ def _db_path() -> str:
     return os.environ.get("FLIGHTFINDER_DB", "flightfinder.db")
 
 
-def _print_table(console: Console, trip: TripConfig, combos: list, threshold: float | None) -> None:
+def _print_table(
+    console: Console,
+    trip: TripConfig,
+    combos: list,
+    threshold: float | None,
+) -> None:
     title = f"{trip.name}  ({trip.origin} -> X -> {trip.destination})"
     table = Table(title=title, show_lines=False)
     table.add_column("X", style="cyan")
@@ -47,17 +52,19 @@ def _print_table(console: Console, trip: TripConfig, combos: list, threshold: fl
     table.add_column("Total", justify="right", style="bold")
     table.add_column("Currency")
     for c in combos[:15]:
-        total_str = f"{c.total_price:.2f}" if not isinstance(c, ComboRow) else f"{c.total_price:.2f}"
-        row_style = "green" if threshold is not None and c.total_price <= threshold else None
+        row_style = (
+            "green" if threshold is not None and c.total_price <= threshold else None
+        )
+        is_row = isinstance(c, ComboRow)
         table.add_row(
             c.intermediate,
-            _fmt_dt(c.leg1.depart) if hasattr(c, "leg1") else c.leg1_depart,
-            _fmt_dt(c.leg2.depart) if hasattr(c, "leg2") else c.leg2_depart,
+            c.leg1_depart if is_row else _fmt_dt(c.leg1.depart),
+            c.leg2_depart if is_row else _fmt_dt(c.leg2.depart),
             str(c.layover_nights),
-            f"{c.leg1.price:.2f}" if hasattr(c, "leg1") else f"{c.leg1_price:.2f}",
-            f"{c.leg2.price:.2f}" if hasattr(c, "leg2") else f"{c.leg2_price:.2f}",
-            total_str,
-            c.leg1.currency if hasattr(c, "leg1") else c.currency,
+            f"{(c.leg1_price if is_row else c.leg1.price):.2f}",
+            f"{(c.leg2_price if is_row else c.leg2.price):.2f}",
+            f"{c.total_price:.2f}",
+            c.currency if is_row else c.leg1.currency,
             style=row_style,
         )
     console.print(table)
@@ -70,47 +77,45 @@ def _fmt_dt(value) -> str:
 async def _refresh(cfg: Config, only_trip: str | None, console: Console) -> int:
     storage = Storage(_db_path())
     exit_code = 0
-    async with AmadeusClient() as client:
-        for trip in cfg.trips:
-            if only_trip and trip.name != only_trip:
-                continue
-            console.print(f"[bold]Refreshing[/bold] {trip.name} ...")
-            try:
-                combos = await search_trip(
-                    client,
-                    storage,
-                    trip,
-                    candidate_cap=cfg.defaults.candidate_intermediate_cities_max,
-                    cache_ttl_seconds=cfg.defaults.cache_ttl_hours * 3600,
-                )
-            except Exception as exc:  # noqa: BLE001
-                console.print(f"[red]ERROR[/red] {trip.name}: {exc}")
-                log.exception("refresh failed for %s", trip.name)
-                exit_code = 1
-                continue
+    for trip in cfg.trips:
+        if only_trip and trip.name != only_trip:
+            continue
+        console.print(f"[bold]Refreshing[/bold] {trip.name} ...")
+        try:
+            combos = await search_trip(
+                storage,
+                trip,
+                candidate_cap=cfg.defaults.candidate_intermediate_cities_max,
+                cache_ttl_seconds=cfg.defaults.cache_ttl_hours * 3600,
+            )
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[red]ERROR[/red] {trip.name}: {exc}")
+            log.exception("refresh failed for %s", trip.name)
+            exit_code = 1
+            continue
 
-            storage.upsert_trip(trip.name, trip.model_dump_json())
-            with storage.replace_combos(trip.name):
-                cheapest_id: int | None = None
-                cheapest_price: float | None = None
-                for c in combos:
-                    new_id = storage.insert_combo(trip.name, c.as_dict())
-                    if cheapest_price is None or c.total_price < cheapest_price:
-                        cheapest_price = c.total_price
-                        cheapest_id = new_id
-            storage.record_price_point(trip.name, cheapest_price, cheapest_id)
+        storage.upsert_trip(trip.name, trip.model_dump_json())
+        with storage.replace_combos(trip.name):
+            cheapest_id: int | None = None
+            cheapest_price: float | None = None
+            for c in combos:
+                new_id = storage.insert_combo(trip.name, c.as_dict())
+                if cheapest_price is None or c.total_price < cheapest_price:
+                    cheapest_price = c.total_price
+                    cheapest_id = new_id
+        storage.record_price_point(trip.name, cheapest_price, cheapest_id)
 
-            if not combos:
-                console.print(f"[yellow]No combos found for {trip.name}.[/yellow]")
-                continue
+        if not combos:
+            console.print(f"[yellow]No combos found for {trip.name}.[/yellow]")
+            continue
 
-            _print_table(console, trip, combos, trip.max_total_price)
-            if trip.max_total_price is not None and combos[0].total_price <= trip.max_total_price:
-                console.print(
-                    f"[bold green]ALERT[/bold green] {trip.name}: cheapest "
-                    f"{combos[0].total_price:.2f} {combos[0].leg1.currency} "
-                    f"is at/under threshold {trip.max_total_price:.2f}."
-                )
+        _print_table(console, trip, combos, trip.max_total_price)
+        if trip.max_total_price is not None and combos[0].total_price <= trip.max_total_price:
+            console.print(
+                f"[bold green]ALERT[/bold green] {trip.name}: cheapest "
+                f"{combos[0].total_price:.2f} {combos[0].leg1.currency} "
+                f"is at/under threshold {trip.max_total_price:.2f}."
+            )
     storage.close()
     return exit_code
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Flight-finder price refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Edit these paths for your checkout.
+WorkingDirectory=%h/Flight-finder
+EnvironmentFile=%h/Flight-finder/.env
+ExecStart=%h/Flight-finder/.venv/bin/python -m flightfinder.cli --config %h/Flight-finder/config.yaml refresh

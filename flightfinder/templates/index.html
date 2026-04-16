@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Trips — Flight-finder{% endblock %}
+{% block content %}
+<h1>Tracked trips</h1>
+{% if not cards %}
+    <p class="empty">No trips yet. Run <code>flightfinder refresh</code> to populate.</p>
+{% endif %}
+<div class="cards">
+    {% for card in cards %}
+    <a class="card" href="/trip/{{ card.trip.name }}">
+        <h2>{{ card.trip.name }}</h2>
+        <p class="route">
+            {{ card.trip.config.origin }} &rarr; <em>anywhere</em> &rarr; {{ card.trip.config.destination }}
+        </p>
+        {% if card.cheapest %}
+        <p class="price">
+            <span class="amount">{{ '%.2f' % card.cheapest.total_price }}</span>
+            <span class="currency">{{ card.cheapest.currency }}</span>
+        </p>
+        <p class="meta">
+            via <strong>{{ card.cheapest.intermediate }}</strong>,
+            {{ card.cheapest.layover_nights }} nights,
+            last seen {{ card.cheapest.found_at | ts }}
+        </p>
+        {% else %}
+        <p class="empty">No results yet.</p>
+        {% endif %}
+    </a>
+    {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,40 @@
+# Flight-finder configuration.
+# Copy to `config.yaml` and edit. Airport/city codes are IATA (3 letters).
+
+defaults:
+  currency: EUR
+  # Cap on how many candidate intermediate cities we query per trip.
+  candidate_intermediate_cities_max: 25
+  # Cache TTL for per-leg flight-offer results. Refreshes within this window
+  # will not re-hit the Amadeus API for the same (origin, destination, date).
+  cache_ttl_hours: 6
+
+trips:
+  - name: lon-to-tyo-citybreak
+    origin: LON                 # Any London airport
+    destination: TYO            # Any Tokyo airport
+    depart_date_from: 2026-06-01
+    depart_date_to:   2026-06-15
+    # Spend 3 to 6 nights in the intermediate city.
+    layover_nights_min: 3
+    layover_nights_max: 6
+    # Alert / highlight combos below this total (leg1 + leg2 for 1 adult).
+    max_total_price: 900
+    # If empty, the tracker uses Amadeus Flight Inspiration Search to
+    # discover candidate intermediate cities. Otherwise, only these are tried.
+    candidate_intermediate_cities: []
+    adults: 1
+    cabin: ECONOMY
+
+  - name: ber-to-nyc-with-break
+    origin: BER
+    destination: NYC
+    depart_date_from: 2026-09-01
+    depart_date_to:   2026-09-20
+    layover_nights_min: 2
+    layover_nights_max: 5
+    max_total_price: 700
+    # Whitelist: only price stops through these hubs.
+    candidate_intermediate_cities: [LIS, MAD, BCN, DUB, LON, PAR, REK]
+    adults: 1
+    cabin: ECONOMY

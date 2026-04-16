@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ trip.name }} — Flight-finder{% endblock %}
+{% block content %}
+<h1>{{ trip.name }}</h1>
+<p class="route">
+    {{ trip.config.origin }} &rarr; <em>anywhere</em> &rarr; {{ trip.config.destination }},
+    depart {{ trip.config.depart_date_from }} to {{ trip.config.depart_date_to }},
+    {{ trip.config.layover_nights_min }}–{{ trip.config.layover_nights_max }} nights layover.
+</p>
+
+<h2>Price history (cheapest combo over time)</h2>
+<canvas id="chart" height="120"></canvas>
+
+<h2>Current cheapest combos</h2>
+<table class="combos">
+    <thead>
+        <tr>
+            <th>Via</th>
+            <th>Depart leg 1</th>
+            <th>Depart leg 2</th>
+            <th>Nights</th>
+            <th>Leg 1</th>
+            <th>Leg 2</th>
+            <th>Total</th>
+            <th>Carriers</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in combos %}
+        <tr>
+            <td><strong>{{ c.intermediate }}</strong></td>
+            <td>{{ c.leg1_depart }}</td>
+            <td>{{ c.leg2_depart }}</td>
+            <td>{{ c.layover_nights }}</td>
+            <td>{{ '%.2f' % c.leg1_price }} {{ c.currency }}</td>
+            <td>{{ '%.2f' % c.leg2_price }} {{ c.currency }}</td>
+            <td><strong>{{ '%.2f' % c.total_price }}</strong> {{ c.currency }}</td>
+            <td>{{ c.leg1_carrier or '' }} / {{ c.leg2_carrier or '' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+    const data = {{ chart_json | safe }};
+    new Chart(document.getElementById('chart'), {
+        type: 'line',
+        data: {
+            labels: data.labels,
+            datasets: [{
+                label: 'Cheapest total',
+                data: data.prices,
+                tension: 0.2,
+            }],
+        },
+        options: { scales: { y: { beginAtZero: false } } },
+    });
+</script>
+{% endblock %}
